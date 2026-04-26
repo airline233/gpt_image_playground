@@ -1,4 +1,5 @@
 import type { AppSettings, ImageApiResponse, TaskParams } from '../types'
+import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
 import { buildApiUrl, readClientDevProxyConfig } from './devProxy'
 
 const MIME_MAP: Record<string, string> = {
@@ -48,6 +49,7 @@ export interface CallApiOptions {
   params: TaskParams
   /** 输入图片的 data URL 列表 */
   inputImageDataUrls: string[]
+  maskDataUrl?: string
 }
 
 export interface CallApiResult {
@@ -84,13 +86,21 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
       if (params.output_format !== 'png' && params.output_compression != null) {
         formData.append('output_compression', String(params.output_compression))
       }
+      if (params.n > 1) {
+        formData.append('n', String(params.n))
+      }
 
       for (let i = 0; i < inputImageDataUrls.length; i++) {
         const dataUrl = inputImageDataUrls[i]
-        const resp = await fetch(dataUrl)
-        const blob = await resp.blob()
+        const blob = opts.maskDataUrl && i === 0
+          ? await imageDataUrlToPngBlob(dataUrl)
+          : await dataUrlToBlob(dataUrl)
         const ext = blob.type.split('/')[1] || 'png'
         formData.append('image[]', blob, `input-${i + 1}.${ext}`)
+      }
+
+      if (opts.maskDataUrl) {
+        formData.append('mask', await maskDataUrlToPngBlob(opts.maskDataUrl), 'mask.png')
       }
 
       response = await fetch(buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig), {

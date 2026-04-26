@@ -8,6 +8,11 @@ export default function ConfirmDialog() {
   useCloseOnEscape(Boolean(confirmDialog), () => setConfirmDialog(null))
 
   if (!confirmDialog) return null
+  const confirmTone = confirmDialog.tone ?? 'danger'
+  const confirmClassName =
+    confirmTone === 'warning'
+      ? 'bg-orange-500 hover:bg-orange-600'
+      : 'bg-red-500 hover:bg-red-600'
 
   return (
     <div
@@ -35,9 +40,9 @@ export default function ConfirmDialog() {
               confirmDialog.action()
               setConfirmDialog(null)
             }}
-            className="flex-1 py-2 rounded-lg bg-red-500 text-white text-sm font-medium hover:bg-red-600 transition"
+            className={`flex-1 py-2 rounded-lg text-white text-sm font-medium transition ${confirmClassName}`}
           >
-            确认删除
+            {confirmDialog.confirmText ?? '确认删除'}
           </button>
         </div>
       </div>

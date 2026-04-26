@@ -210,6 +210,11 @@ export default function TaskCard({
                 <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
                   {task.params.output_format}
                 </span>
+                {task.maskImageId && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400 flex-shrink-0">
+                    mask
+                  </span>
+                )}
               </div>
             {/* 操作按钮 */}
             <div

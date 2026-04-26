@@ -45,6 +45,12 @@ export interface InputImage {
   dataUrl: string
 }
 
+export interface MaskDraft {
+  targetImageId: string
+  maskDataUrl: string
+  updatedAt: number
+}
+
 // ===== 任务记录 =====
 
 export type TaskStatus = 'running' | 'done' | 'error'
@@ -55,6 +61,8 @@ export interface TaskRecord {
   params: TaskParams
   /** 输入图片的 image store id 列表 */
   inputImageIds: string[]
+  maskTargetImageId?: string | null
+  maskImageId?: string | null
   /** 输出图片的 image store id 列表 */
   outputImages: string[]
   status: TaskStatus
@@ -72,8 +80,8 @@ export interface StoredImage {
   dataUrl: string
   /** 图片首次存储时间（ms） */
   createdAt?: number
-  /** 图片来源：用户上传 / API 生成 */
-  source?: 'upload' | 'generated'
+  /** 图片来源：用户上传 / API 生成 / 遮罩 */
+  source?: 'upload' | 'generated' | 'mask'
 }
 
 // ===== API 请求体 =====
@@ -112,6 +120,6 @@ export interface ExportData {
   imageFiles: Record<string, {
     path: string
     createdAt?: number
-    source?: 'upload' | 'generated'
+    source?: 'upload' | 'generated' | 'mask'
   }>
 }
