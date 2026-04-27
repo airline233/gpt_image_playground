@@ -20,6 +20,7 @@ export default function DetailModal() {
   const [imageRatios, setImageRatios] = useState<Record<string, string>>({})
   const [imageSizes, setImageSizes] = useState<Record<string, string>>({})
   const [maskPreviewSrc, setMaskPreviewSrc] = useState('')
+  const [now, setNow] = useState(Date.now())
   const imagePanelRef = useRef<HTMLDivElement>(null)
   const mainImageRef = useRef<HTMLImageElement>(null)
   const [imageLabelLeft, setImageLabelLeft] = useState(8)
@@ -35,6 +36,12 @@ export default function DetailModal() {
   useEffect(() => {
     setImageIndex(0)
   }, [detailTaskId])
+
+  useEffect(() => {
+    if (task?.status !== 'running') return
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [task?.status])
 
   // 加载所有相关图片
   useEffect(() => {
@@ -72,7 +79,7 @@ export default function DetailModal() {
   const maskTargetId = task?.maskTargetImageId || null
   const maskTargetSrc = maskTargetId ? imageSrcs[maskTargetId] || '' : ''
   const maskSrc = task?.maskImageId ? imageSrcs[task.maskImageId] || '' : ''
-  const referenceInputImageIds = task?.inputImageIds?.filter((id) => id !== maskTargetId) ?? []
+  const allInputImageIds = task?.inputImageIds ?? []
 
   useEffect(() => {
     if (!currentOutputImageId || !currentOutputImageSrc) return
@@ -159,6 +166,12 @@ export default function DetailModal() {
   }
 
   const formatDuration = () => {
+    if (task.status === 'running') {
+      const seconds = Math.max(0, Math.floor((now - task.createdAt) / 1000))
+      const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
+      const ss = String(seconds % 60).padStart(2, '0')
+      return `${mm}:${ss}`
+    }
     if (task.elapsed == null) return null
     const seconds = Math.floor(task.elapsed / 1000)
     const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
@@ -224,7 +237,7 @@ export default function DetailModal() {
   }
 
   const handleCopyInputImage = async () => {
-    const imgId = referenceInputImageIds[0]
+    const imgId = allInputImageIds[0]
     const src = imgId ? imageSrcs[imgId] : ''
     if (!src) return
     try {
@@ -336,10 +349,18 @@ export default function DetailModal() {
             </>
           )}
           {task.status === 'running' && (
-            <svg className="w-10 h-10 text-blue-400 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-            </svg>
+            <>
+              <div className="absolute left-4 top-4 flex items-center gap-1 bg-black/50 text-white text-xs px-2 py-0.5 rounded backdrop-blur-sm font-mono">
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {formatDuration()}
+              </div>
+              <svg className="w-10 h-10 text-blue-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            </>
           )}
           {task.status === 'error' && (
             <div className="w-full max-w-md px-4 text-center">
@@ -428,7 +449,7 @@ export default function DetailModal() {
             )}
 
             {/* 参考图 */}
-            {referenceInputImageIds.length > 0 && (
+            {allInputImageIds.length > 0 && (
               <div className="mb-4">
                 <div className="flex items-center gap-1.5 mb-2">
                   <h3 className="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
@@ -445,29 +466,31 @@ export default function DetailModal() {
                   </button>
                 </div>
                 <div className="flex gap-2 flex-wrap">
-                  {referenceInputImageIds.map((imgId) => (
-                    <img
-                      key={imgId}
-                      src={imageSrcs[imgId] || ''}
-                      className="w-16 h-16 rounded-lg object-cover border border-gray-200 dark:border-white/[0.08] cursor-pointer hover:opacity-80 transition"
-                      onClick={() => setLightboxImageId(imgId, referenceInputImageIds)}
-                      alt=""
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {maskTargetSrc && maskSrc && (
-              <div className="mb-4">
-                <h3 className="text-xs font-medium text-orange-500 uppercase tracking-wider mb-2">
-                  遮罩预览
-                </h3>
-                <div className="relative inline-block overflow-hidden rounded-lg border border-orange-200 dark:border-orange-400/30">
-                  <img src={maskPreviewSrc || maskTargetSrc} className="h-24 w-24 object-cover" alt="" />
-                  <span className="absolute left-1 top-1 rounded bg-orange-500 px-1.5 py-0.5 text-[10px] text-white">
-                    遮罩主图
-                  </span>
+                  {allInputImageIds.map((imgId) => {
+                    const isMaskTarget = imgId === maskTargetId
+                    const displaySrc = (isMaskTarget && maskPreviewSrc) ? maskPreviewSrc : (imageSrcs[imgId] || '')
+                    return (
+                      <div key={imgId} className="relative group inline-block">
+                        <div
+                          className={`relative w-16 h-16 rounded-lg overflow-hidden border cursor-pointer hover:opacity-80 transition ${
+                            isMaskTarget ? 'border-blue-500 border-2 shadow-sm' : 'border-gray-200 dark:border-white/[0.08]'
+                          }`}
+                          onClick={() => setLightboxImageId(imgId, allInputImageIds)}
+                        >
+                          <img
+                            src={displaySrc}
+                            className="w-full h-full object-cover"
+                            alt=""
+                          />
+                          {isMaskTarget && (
+                            <span className="absolute left-1 top-1 rounded bg-blue-500/90 px-1.5 py-0.5 text-[8px] leading-none text-white font-bold tracking-wider backdrop-blur-sm z-10 pointer-events-none">
+                              MASK
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             )}
@@ -519,10 +542,10 @@ export default function DetailModal() {
           </div>
 
           {/* 操作按钮 */}
-          <div className="flex flex-wrap gap-2 pt-3 border-t border-gray-100 dark:border-white/[0.08]">
+          <div className="grid grid-cols-4 sm:flex gap-2 pt-4 border-t border-gray-100 dark:border-white/[0.08]">
             <button
               onClick={handleReuse}
-              className="min-w-[7rem] flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-500/20 transition text-xs sm:text-sm font-medium whitespace-nowrap"
+              className="col-span-2 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-500/20 transition text-sm font-medium whitespace-nowrap"
             >
               <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
@@ -532,7 +555,7 @@ export default function DetailModal() {
             <button
               onClick={handleEdit}
               disabled={!outputLen}
-              className="min-w-[7rem] flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-green-50 dark:bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-100 dark:hover:bg-green-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition text-xs sm:text-sm font-medium whitespace-nowrap"
+              className="col-span-2 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-green-50 dark:bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-100 dark:hover:bg-green-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition text-sm font-medium whitespace-nowrap"
             >
               <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -540,15 +563,8 @@ export default function DetailModal() {
               编辑输出
             </button>
             <button
-              onClick={handleMaskEditCurrentOutput}
-              disabled={!currentOutputImageId}
-              className="min-w-[7rem] flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400 hover:bg-orange-100 dark:hover:bg-orange-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition text-xs sm:text-sm font-medium whitespace-nowrap"
-            >
-              遮罩编辑
-            </button>
-            <button
               onClick={handleDelete}
-              className="min-w-[7rem] flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 transition text-xs sm:text-sm font-medium whitespace-nowrap"
+              className="col-span-3 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 transition text-sm font-medium whitespace-nowrap"
             >
               <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />

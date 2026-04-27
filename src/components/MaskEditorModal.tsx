@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { ensureImageCached, useStore } from '../store'
 import { canvasToBlob, loadImage } from '../lib/canvasImage'
+import { storeImage } from '../lib/db'
+import { prepareMaskTargetDataUrl, replaceMaskTargetImage } from '../lib/maskPreprocess'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import {
   clampViewTransform,
   clientPointToCanvasPoint,
   getComfortableInitialTransform,
   getPinchTransform,
+  zoomAtPoint,
   type Point,
   type ViewTransform,
 } from '../lib/viewportTransform'
@@ -19,10 +23,21 @@ interface CanvasSize {
   height: number
 }
 
+interface SliderAnchor {
+  left: number
+  bottom: number
+}
+
 interface PinchGesture {
   startTransform: ViewTransform
   startCentroid: Point
   startDistance: number
+}
+
+interface PanGesture {
+  pointerId: number
+  startPoint: Point
+  startTransform: ViewTransform
 }
 
 const DEFAULT_VIEW_TRANSFORM: ViewTransform = { scale: 1, x: 0, y: 0 }
@@ -60,6 +75,21 @@ function fillWhiteMask(canvas: HTMLCanvasElement) {
   ctx.fillRect(0, 0, canvas.width, canvas.height)
 }
 
+function drawMaskImageToCanvas(maskImage: HTMLImageElement, maskCanvas: HTMLCanvasElement) {
+  const maskAspect = maskImage.naturalWidth / maskImage.naturalHeight
+  const canvasAspect = maskCanvas.width / maskCanvas.height
+  if (Math.abs(maskAspect - canvasAspect) > 0.001) {
+    throw new Error('遮罩尺寸与当前图片不一致')
+  }
+
+  const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })
+  if (!maskCtx) throw new Error('当前浏览器不支持 Canvas')
+  maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height)
+  maskCtx.imageSmoothingEnabled = true
+  maskCtx.imageSmoothingQuality = 'high'
+  maskCtx.drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height)
+}
+
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -72,23 +102,30 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 export default function MaskEditorModal() {
   const imageId = useStore((s) => s.maskEditorImageId)
   const setMaskEditorImageId = useStore((s) => s.setMaskEditorImageId)
-  const inputImages = useStore((s) => s.inputImages)
-  const addInputImage = useStore((s) => s.addInputImage)
   const maskDraft = useStore((s) => s.maskDraft)
   const setMaskDraft = useStore((s) => s.setMaskDraft)
+  const clearMaskDraft = useStore((s) => s.clearMaskDraft)
+  const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const showToast = useStore((s) => s.showToast)
 
   const imageCanvasRef = useRef<HTMLCanvasElement>(null)
   const previewCanvasRef = useRef<HTMLCanvasElement>(null)
   const maskCanvasRef = useRef<HTMLCanvasElement>(null)
+  const cursorCanvasRef = useRef<HTMLCanvasElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const baseFrameRef = useRef<HTMLDivElement>(null)
+  const brushSizeControlRef = useRef<HTMLDivElement>(null)
+  const brushSizeButtonRef = useRef<HTMLButtonElement>(null)
+  const brushSizePanelRef = useRef<HTMLDivElement>(null)
+  const maskInfoTimerRef = useRef<number | null>(null)
   const activePointerIdRef = useRef<number | null>(null)
   const lastPointRef = useRef<Point | null>(null)
   const pointerPositionsRef = useRef<Map<number, Point>>(new Map())
   const pinchGestureRef = useRef<PinchGesture | null>(null)
+  const panGestureRef = useRef<PanGesture | null>(null)
   const undoStackRef = useRef<ImageData[]>([])
   const redoStackRef = useRef<ImageData[]>([])
+  const previewFrameRef = useRef<number | null>(null)
   const saveTokenRef = useRef(0)
   const sessionIdRef = useRef(0)
   const activeSessionIdRef = useRef(0)
@@ -98,17 +135,63 @@ export default function MaskEditorModal() {
   const [size, setSize] = useState<CanvasSize | null>(null)
   const [tool, setTool] = useState<Tool>('brush')
   const [brushSize, setBrushSize] = useState(64)
-  const [viewTransform, setViewTransform] = useState<ViewTransform>(DEFAULT_VIEW_TRANSFORM)
   const [showBrushControls, setShowBrushControls] = useState(false)
+  const [viewTransform, setViewTransform] = useState<ViewTransform>(DEFAULT_VIEW_TRANSFORM)
   const [isLoading, setIsLoading] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [historyState, setHistoryState] = useState({ undo: 0, redo: 0 })
+  const [hoverPoint, setHoverPoint] = useState<Point | null>(null)
+  const [isPointerOverCanvas, setIsPointerOverCanvas] = useState(false)
+  const [isAltKeyPressed, setIsAltKeyPressed] = useState(false)
+  const [isPanning, setIsPanning] = useState(false)
+  const [sliderAnchor, setSliderAnchor] = useState<SliderAnchor | null>(null)
+  const [showMaskInfo, setShowMaskInfo] = useState(false)
 
   const close = () => {
     if (isSaving) return
     setMaskEditorImageId(null)
   }
   useCloseOnEscape(Boolean(imageId), close)
+
+  useEffect(() => () => {
+    if (maskInfoTimerRef.current != null) {
+      window.clearTimeout(maskInfoTimerRef.current)
+    }
+  }, [])
+
+  const showMaskInfoPopover = () => setShowMaskInfo(true)
+
+  const hideMaskInfoPopover = () => {
+    setShowMaskInfo(false)
+    clearMaskInfoTimer()
+  }
+
+  const clearMaskInfoTimer = () => {
+    if (maskInfoTimerRef.current != null) {
+      window.clearTimeout(maskInfoTimerRef.current)
+      maskInfoTimerRef.current = null
+    }
+  }
+
+  const startMaskInfoTouch = () => {
+    maskInfoTimerRef.current = window.setTimeout(() => {
+      setShowMaskInfo(true)
+      maskInfoTimerRef.current = null
+    }, 450)
+  }
+
+  const handleRemoveMask = () => {
+    setConfirmDialog({
+      title: '移除遮罩',
+      message: '确定要撤销对这张图片的所有涂抹并移除遮罩吗？',
+      tone: 'danger',
+      action: () => {
+        clearMaskDraft()
+        setMaskEditorImageId(null)
+        showToast('已移除遮罩', 'success')
+      },
+    })
+  }
 
   function commitViewTransform(nextTransform: ViewTransform) {
     const frame = baseFrameRef.current
@@ -190,28 +273,104 @@ export default function MaskEditorModal() {
     })
   }
 
-  function renderPreview() {
+  function renderPreviewNow() {
     const maskCanvas = maskCanvasRef.current
     const previewCanvas = previewCanvasRef.current
     if (!maskCanvas || !previewCanvas) return
 
-    const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })
     const previewCtx = previewCanvas.getContext('2d')
-    if (!maskCtx || !previewCtx) return
+    if (!previewCtx) return
 
-    const maskPixels = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
-    const overlay = previewCtx.createImageData(previewCanvas.width, previewCanvas.height)
+    previewFrameRef.current = null
+    previewCtx.save()
+    previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height)
+    previewCtx.globalCompositeOperation = 'source-over'
+    previewCtx.fillStyle = 'rgba(59, 130, 246, 0.58)'
+    previewCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height)
+    previewCtx.globalCompositeOperation = 'destination-out'
+    previewCtx.drawImage(maskCanvas, 0, 0)
+    previewCtx.restore()
+  }
 
-    for (let i = 0; i < maskPixels.data.length; i += 4) {
-      const editStrength = 255 - maskPixels.data[i + 3]
-      overlay.data[i] = 255
-      overlay.data[i + 1] = 112
-      overlay.data[i + 2] = 32
-      overlay.data[i + 3] = Math.round(editStrength * 0.58)
+  function renderPreview() {
+    if (previewFrameRef.current != null) return
+    previewFrameRef.current = window.requestAnimationFrame(renderPreviewNow)
+  }
+
+  function updateCursor(point: Point | null) {
+    const cursorCanvas = cursorCanvasRef.current
+    const stage = stageRef.current
+    const frame = baseFrameRef.current
+    const maskCanvas = maskCanvasRef.current
+    const ctx = cursorCanvas?.getContext('2d')
+    if (!cursorCanvas || !ctx || !stage || !frame || !maskCanvas) return
+
+    const dpr = window.devicePixelRatio || 1
+    const width = stage.clientWidth
+    const height = stage.clientHeight
+    if (cursorCanvas.width !== Math.round(width * dpr) || cursorCanvas.height !== Math.round(height * dpr)) {
+      cursorCanvas.width = Math.round(width * dpr)
+      cursorCanvas.height = Math.round(height * dpr)
     }
 
-    previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height)
-    previewCtx.putImageData(overlay, 0, 0)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, width, height)
+    if (!point) return
+
+    const scale = viewTransformRef.current.scale
+    const stageRect = stage.getBoundingClientRect()
+    const frameRect = frame.getBoundingClientRect()
+    const frameLeft = frameRect.left - stageRect.left
+    const frameTop = frameRect.top - stageRect.top
+    const x = frameLeft + (point.x / maskCanvas.width) * frame.clientWidth * scale + viewTransformRef.current.x
+    const y = frameTop + (point.y / maskCanvas.height) * frame.clientHeight * scale + viewTransformRef.current.y
+    const radius = (brushSize / 2 / maskCanvas.width) * frame.clientWidth * scale
+
+    ctx.save()
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.arc(x, y, radius, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)'
+    ctx.stroke()
+    
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)'
+    ctx.beginPath()
+    ctx.arc(x, y, radius + 1, 0, Math.PI * 2)
+    ctx.stroke()
+    
+    ctx.beginPath()
+    ctx.arc(x, y, Math.max(0, radius - 1), 0, Math.PI * 2)
+    ctx.stroke()
+
+    const crosshairSize = 5
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)'
+    ctx.beginPath()
+    ctx.moveTo(x - crosshairSize, y)
+    ctx.lineTo(x + crosshairSize, y)
+    ctx.moveTo(x, y - crosshairSize)
+    ctx.lineTo(x, y + crosshairSize)
+    ctx.stroke()
+
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)'
+    ctx.beginPath()
+    ctx.moveTo(x - crosshairSize, y)
+    ctx.lineTo(x + crosshairSize, y)
+    ctx.moveTo(x, y - crosshairSize)
+    ctx.lineTo(x, y + crosshairSize)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  function getViewportCenterCanvasPoint(): Point | null {
+    const frame = baseFrameRef.current
+    const maskCanvas = maskCanvasRef.current
+    if (!frame || !maskCanvas) return null
+
+    const transform = viewTransformRef.current
+    return {
+      x: ((frame.clientWidth / 2 - transform.x) / transform.scale / frame.clientWidth) * maskCanvas.width,
+      y: ((frame.clientHeight / 2 - transform.y) / transform.scale / frame.clientHeight) * maskCanvas.height,
+    }
   }
 
   function pushUndoSnapshot() {
@@ -287,12 +446,17 @@ export default function MaskEditorModal() {
 
   useEffect(() => {
     if (!imageId) {
+      if (previewFrameRef.current != null) {
+        window.cancelAnimationFrame(previewFrameRef.current)
+        previewFrameRef.current = null
+      }
       setSourceDataUrl('')
       setSize(null)
-      setShowBrushControls(false)
       setIsLoading(false)
       pointerPositionsRef.current.clear()
       pinchGestureRef.current = null
+      panGestureRef.current = null
+      setIsPanning(false)
       viewTransformRef.current = DEFAULT_VIEW_TRANSFORM
       setViewTransform(DEFAULT_VIEW_TRANSFORM)
       undoStackRef.current = []
@@ -320,10 +484,11 @@ export default function MaskEditorModal() {
           return
         }
 
-        const image = await loadImage(dataUrl)
+        const preparedTarget = await prepareMaskTargetDataUrl(dataUrl)
+        const image = await loadImage(preparedTarget.dataUrl)
         if (cancelled) return
 
-        const nextSize = { width: image.naturalWidth, height: image.naturalHeight }
+        const nextSize = { width: preparedTarget.width, height: preparedTarget.height }
         const imageCanvas = imageCanvasRef.current
         const previewCanvas = previewCanvasRef.current
         const maskCanvas = maskCanvasRef.current
@@ -345,13 +510,7 @@ export default function MaskEditorModal() {
           try {
             const draftImage = await loadImage(maskDraft.maskDataUrl)
             if (cancelled) return
-            if (draftImage.naturalWidth !== nextSize.width || draftImage.naturalHeight !== nextSize.height) {
-              throw new Error('遮罩尺寸与当前图片不一致')
-            }
-            const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })
-            if (!maskCtx) throw new Error('当前浏览器不支持 Canvas')
-            maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height)
-            maskCtx.drawImage(draftImage, 0, 0)
+            drawMaskImageToCanvas(draftImage, maskCanvas)
           } catch (err) {
             fillWhiteMask(maskCanvas)
             showToast(
@@ -362,8 +521,14 @@ export default function MaskEditorModal() {
         }
 
         renderPreview()
-        setSourceDataUrl(dataUrl)
+        setSourceDataUrl(preparedTarget.dataUrl)
         setSize(nextSize)
+        if (preparedTarget.wasResized) {
+          showToast(
+            `已为遮罩编辑按官方要求调整图片尺寸：\n${preparedTarget.originalWidth}×${preparedTarget.originalHeight} → ${preparedTarget.width}×${preparedTarget.height}`,
+            'info',
+          )
+        }
         requestAnimationFrame(() => resetViewTransform())
       } catch (err) {
         if (!cancelled) {
@@ -379,12 +544,65 @@ export default function MaskEditorModal() {
 
     return () => {
       cancelled = true
+      if (previewFrameRef.current != null) {
+        window.cancelAnimationFrame(previewFrameRef.current)
+        previewFrameRef.current = null
+      }
       activePointerIdRef.current = null
       lastPointRef.current = null
       pointerPositionsRef.current.clear()
       pinchGestureRef.current = null
+      panGestureRef.current = null
+      setIsPanning(false)
     }
   }, [imageId, maskDraft, setMaskEditorImageId, showToast])
+
+  useEffect(() => {
+    if (isAltKeyPressed) {
+      updateCursor(null)
+    } else if (showBrushControls && !isPointerOverCanvas && size) {
+      updateCursor(getViewportCenterCanvasPoint())
+    } else {
+      updateCursor(hoverPoint)
+    }
+  }, [brushSize, viewTransform, hoverPoint, isPointerOverCanvas, showBrushControls, size, isAltKeyPressed])
+
+  useEffect(() => {
+    if (!imageId) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey) setIsAltKeyPressed(true)
+    }
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'Alt') setIsAltKeyPressed(false)
+    }
+    const handleBlur = () => setIsAltKeyPressed(false)
+
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+    window.addEventListener('blur', handleBlur)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+      window.removeEventListener('blur', handleBlur)
+    }
+  }, [imageId])
+
+  useEffect(() => {
+    if (!showBrushControls) return
+
+    const closeBrushControls = (event: PointerEvent) => {
+      const control = brushSizeControlRef.current
+      const panel = brushSizePanelRef.current
+      if (control?.contains(event.target as Node)) return
+      if (panel?.contains(event.target as Node)) return
+      setShowBrushControls(false)
+      setSliderAnchor(null)
+    }
+
+    document.addEventListener('pointerdown', closeBrushControls, true)
+    return () => document.removeEventListener('pointerdown', closeBrushControls, true)
+  }, [showBrushControls])
 
   useEffect(() => {
     const frame = baseFrameRef.current
@@ -407,7 +625,24 @@ export default function MaskEditorModal() {
   const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (!isReady || isSaving || (event.pointerType !== 'touch' && event.button !== 0)) return
     event.preventDefault()
+    setShowBrushControls(false)
+    setSliderAnchor(null)
     const canvas = event.currentTarget
+
+    if (event.altKey) {
+      if (!canvas.hasPointerCapture(event.pointerId)) {
+        canvas.setPointerCapture(event.pointerId)
+      }
+      panGestureRef.current = {
+        pointerId: event.pointerId,
+        startPoint: { x: event.clientX, y: event.clientY },
+        startTransform: viewTransformRef.current,
+      }
+      setIsPanning(true)
+      updateCursor(null)
+      return
+    }
+
     pointerPositionsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
     if (!canvas.hasPointerCapture(event.pointerId)) {
       canvas.setPointerCapture(event.pointerId)
@@ -427,6 +662,27 @@ export default function MaskEditorModal() {
   }
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const point = getCanvasPoint(event.currentTarget, event)
+    if (event.pointerType !== 'touch') {
+      setIsPointerOverCanvas(true)
+      setHoverPoint(point)
+      updateCursor(event.altKey || isAltKeyPressed ? null : point)
+    }
+
+    const panGesture = panGestureRef.current
+    if (panGesture?.pointerId === event.pointerId) {
+      const frame = baseFrameRef.current
+      if (!frame) return
+
+      event.preventDefault()
+      commitViewTransform({
+        scale: panGesture.startTransform.scale,
+        x: panGesture.startTransform.x + event.clientX - panGesture.startPoint.x,
+        y: panGesture.startTransform.y + event.clientY - panGesture.startPoint.y,
+      })
+      return
+    }
+
     if (pointerPositionsRef.current.has(event.pointerId)) {
       pointerPositionsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
     }
@@ -437,9 +693,35 @@ export default function MaskEditorModal() {
     }
     if (activePointerIdRef.current !== event.pointerId || !lastPointRef.current || !isReady || isSaving) return
     event.preventDefault()
-    const point = getCanvasPoint(event.currentTarget, event)
     drawStroke(lastPointRef.current, point)
     lastPointRef.current = point
+  }
+
+  const handlePointerLeave = () => {
+    setIsPointerOverCanvas(false)
+    setHoverPoint(null)
+    updateCursor(null)
+  }
+
+  const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    if (!event.altKey || !isReady || isSaving) return
+
+    const frame = baseFrameRef.current
+    if (!frame) return
+
+    event.preventDefault()
+    const rect = frame.getBoundingClientRect()
+    const point = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    }
+    const scaleFactor = Math.exp(-event.deltaY * 0.002)
+    commitViewTransform(zoomAtPoint(
+      viewTransformRef.current,
+      point,
+      viewTransformRef.current.scale * scaleFactor,
+      { width: frame.clientWidth, height: frame.clientHeight },
+    ))
   }
 
   const finishStroke = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -453,9 +735,15 @@ export default function MaskEditorModal() {
       else pinchGestureRef.current = null
     }
 
+    if (panGestureRef.current?.pointerId === event.pointerId) {
+      panGestureRef.current = null
+      setIsPanning(false)
+    }
+
     if (activePointerIdRef.current === event.pointerId) {
       activePointerIdRef.current = null
       lastPointRef.current = null
+      if (hoverPoint) updateCursor(hoverPoint)
     }
   }
 
@@ -493,7 +781,7 @@ export default function MaskEditorModal() {
   const handleSave = async () => {
     const canvas = maskCanvasRef.current
     const savingSessionId = activeSessionIdRef.current
-    if (!canvas || !sourceDataUrl || !isReady || isSaving || !savingSessionId) return
+    if (!canvas || !sourceDataUrl || !imageId || !isReady || isSaving || !savingSessionId) return
 
     const token = ++saveTokenRef.current
     const savingImageId = imageId
@@ -501,17 +789,22 @@ export default function MaskEditorModal() {
       setIsSaving(true)
       const blob = await canvasToBlob(canvas, 'image/png')
       const maskDataUrl = await blobToDataUrl(blob)
+      const workingTargetId = await storeImage(sourceDataUrl, 'upload')
       if (
         saveTokenRef.current !== token ||
         activeSessionIdRef.current !== savingSessionId ||
         useStore.getState().maskEditorImageId !== savingImageId
       ) return
 
-      if (!inputImages.some((img) => img.id === savingImageId)) {
-        addInputImage({ id: savingImageId, dataUrl: sourceDataUrl })
-      }
+      const latestStore = useStore.getState()
+      latestStore.setInputImages(
+        replaceMaskTargetImage(latestStore.inputImages, savingImageId, {
+          id: workingTargetId,
+          dataUrl: sourceDataUrl,
+        }),
+      )
       setMaskDraft({
-        targetImageId: savingImageId,
+        targetImageId: workingTargetId,
         maskDataUrl,
         updatedAt: Date.now(),
       })
@@ -529,221 +822,209 @@ export default function MaskEditorModal() {
     }
   }
 
-  const toolButtonClass = (active: boolean) =>
-    `flex-1 rounded-xl px-3 py-2 text-sm font-medium transition ${
-      active
-        ? 'bg-orange-500 text-white shadow-sm shadow-orange-500/20'
-        : 'bg-white/60 text-gray-600 hover:bg-white dark:bg-white/[0.04] dark:text-gray-300 dark:hover:bg-white/[0.08]'
-    }`
+  const toggleBrushControls = () => {
+    const rect = brushSizeButtonRef.current?.getBoundingClientRect()
+    if (!rect) return
 
-  const actionButtonClass =
-    'rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-600 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-45 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-300 dark:hover:bg-white/[0.08]'
+    setIsPointerOverCanvas(false)
+    setHoverPoint(null)
+    if (size) updateCursor(getViewportCenterCanvasPoint())
 
-  const compactButtonClass = (active = false) =>
-    `h-9 rounded-xl px-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
-      active
-        ? 'bg-orange-500 text-white shadow-sm shadow-orange-500/20'
-        : 'border border-gray-200/70 bg-white/70 text-gray-600 hover:bg-white dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-300 dark:hover:bg-white/[0.08]'
-    }`
+    setSliderAnchor({
+      left: rect.left + rect.width / 2,
+      bottom: window.innerHeight - rect.top + 8,
+    })
+    setShowBrushControls((value) => !value)
+  }
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-end justify-center sm:items-center sm:p-4">
-      <div className="absolute inset-0 bg-black/30 backdrop-blur-md animate-overlay-in" onClick={close} />
-      <div
-        className="relative z-10 flex h-[100dvh] w-full flex-col overflow-hidden bg-white/95 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:bg-gray-900/95 dark:ring-white/10 sm:h-[92vh] sm:max-w-6xl sm:rounded-3xl sm:border sm:border-white/50 dark:sm:border-white/[0.08]"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="mask-editor-title"
-      >
-        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-gray-100 px-4 py-3 dark:border-white/[0.08] sm:px-5">
-          <div className="min-w-0">
-            <h3 id="mask-editor-title" className="text-base font-semibold text-gray-800 dark:text-gray-100">编辑遮罩</h3>
-            <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
-              <span className="sm:hidden">单指涂抹，双指缩放/平移。</span>
-              <span className="hidden sm:inline">橙色区域将被编辑；未涂抹区域保持白色保护。</span>
-            </p>
+    <>
+      <div className="fixed inset-0 z-[80] flex flex-col bg-gray-50 dark:bg-gray-900 animate-modal-in">
+      {/* Header */}
+      <div className="flex-none flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950 z-20">
+        <div className="flex items-center gap-3">
+          <button onClick={close} disabled={isSaving} className="p-2 -ml-2 text-gray-500 hover:bg-gray-100 rounded-lg dark:text-gray-400 dark:hover:bg-gray-800 transition" title="取消">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+          <div className="relative flex items-center gap-1.5">
+            <h2 className="text-sm font-medium text-gray-700 dark:text-gray-200" id="mask-editor-title">编辑遮罩</h2>
+            <button
+              type="button"
+              onClick={showMaskInfoPopover}
+              onMouseEnter={showMaskInfoPopover}
+              onMouseLeave={hideMaskInfoPopover}
+              onTouchStart={startMaskInfoTouch}
+              onTouchEnd={clearMaskInfoTimer}
+              onTouchCancel={hideMaskInfoPopover}
+              className="flex h-6 w-6 items-center justify-center rounded-full text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+              aria-label="遮罩编辑说明"
+              title="遮罩编辑说明"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </button>
+            {showMaskInfo && (
+              <div className="absolute left-0 top-full mt-2 w-64 rounded-xl border border-gray-200/80 bg-white px-3 py-2 text-xs leading-5 text-gray-600 shadow-lg dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-300">
+                <div className="absolute -top-1.5 left-16 h-3 w-3 rotate-45 border-l border-t border-gray-200/80 bg-white dark:border-white/[0.08] dark:bg-gray-900" />
+                根据官方文档说明，此功能仅基于提示词，无法完全控制模型编辑区域
+              </div>
+            )}
           </div>
-          <button
-            onClick={close}
-            className="rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
-            aria-label="关闭"
-          >
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+        </div>
+        <div className="flex items-center gap-2">
+          {maskDraft?.targetImageId === imageId && (
+            <button onClick={handleRemoveMask} className="flex h-8 items-center gap-1.5 px-4 text-sm font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg transition">
+              移除遮罩
+            </button>
+          )}
+          <button onClick={handleSave} disabled={!isReady || isSaving} className="flex h-8 items-center gap-1.5 px-4 text-sm font-medium text-white bg-blue-500 hover:bg-blue-600 rounded-lg disabled:opacity-50 transition">
+            {isSaving ? '保存中...' : '保存'}
           </button>
         </div>
+      </div>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 sm:gap-4 sm:p-4 lg:flex-row lg:p-5">
-          <div ref={stageRef} className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-gray-200/70 bg-[radial-gradient(circle_at_20%_20%,rgba(249,115,22,0.12),transparent_26%),linear-gradient(135deg,rgba(15,23,42,0.06),rgba(255,255,255,0.72))] p-2 dark:border-white/[0.08] dark:bg-[radial-gradient(circle_at_20%_20%,rgba(249,115,22,0.16),transparent_28%),linear-gradient(135deg,rgba(255,255,255,0.05),rgba(0,0,0,0.28))] sm:rounded-3xl sm:p-3">
-            {isLoading && (
-              <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/50 text-sm text-gray-500 backdrop-blur-sm dark:bg-gray-900/50 dark:text-gray-300">
-                正在载入图片...
-              </div>
-            )}
-            <div className="absolute left-3 top-3 z-10 rounded-full bg-black/45 px-2.5 py-1 text-[11px] text-white backdrop-blur-sm lg:hidden">
-              {viewTransform.scale.toFixed(1)}x · 双指缩放
-            </div>
+      {/* Workspace */}
+      <div ref={stageRef} className="flex-1 relative flex items-center justify-center overflow-hidden bg-gray-100/50 dark:bg-black/50 p-0 pb-[76px] sm:p-6 sm:pb-[100px]" style={{ containerType: 'size' }}>
+        {isLoading && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/50 text-sm text-gray-500 backdrop-blur-sm dark:bg-gray-900/50 dark:text-gray-300">
+            正在载入图片...
+          </div>
+        )}
+        <div
+          ref={baseFrameRef}
+          className="relative max-h-full max-w-full sm:rounded-xl shadow-inner sm:ring-1 ring-black/5 touch-none dark:bg-black/50 dark:ring-white/5"
+          onWheel={handleWheel}
+          style={{
+            aspectRatio: size ? `${size.width} / ${size.height}` : '1 / 1',
+            width: size ? `min(100%, 100cqh * ${size.width / size.height})` : '520px',
+            maxHeight: '100%',
+          }}
+        >
             <div
-              ref={baseFrameRef}
-              className="relative max-h-full max-w-full rounded-2xl bg-gray-950/5 shadow-[0_20px_60px_rgba(15,23,42,0.18)] ring-1 ring-black/10 touch-none dark:bg-black/30 dark:ring-white/10"
+              className="absolute inset-0 will-change-transform"
               style={{
-                aspectRatio: size ? `${size.width} / ${size.height}` : '1 / 1',
-                width: size ? 'min(100%, calc((100dvh - 10rem) * var(--mask-aspect)))' : 'min(100%, 520px)',
-                maxHeight: '100%',
-                ['--mask-aspect' as string]: size ? String(size.width / size.height) : '1',
+                transform: `matrix(${viewTransform.scale}, 0, 0, ${viewTransform.scale}, ${viewTransform.x}, ${viewTransform.y})`,
+                transformOrigin: '0 0',
               }}
             >
-              <div
-                className="absolute inset-0 will-change-transform"
-                style={{
-                  transform: `matrix(${viewTransform.scale}, 0, 0, ${viewTransform.scale}, ${viewTransform.x}, ${viewTransform.y})`,
-                  transformOrigin: '0 0',
-                }}
-              >
-                <canvas ref={imageCanvasRef} className="absolute inset-0 h-full w-full" />
-                <canvas ref={previewCanvasRef} className="absolute inset-0 h-full w-full pointer-events-none" />
-                <canvas
-                  ref={maskCanvasRef}
-                  className="absolute inset-0 h-full w-full touch-none select-none opacity-0"
-                  onPointerDown={handlePointerDown}
-                  onPointerMove={handlePointerMove}
-                  onPointerUp={finishStroke}
-                  onPointerCancel={finishStroke}
-                  onLostPointerCapture={finishStroke}
-                />
-              </div>
+              <canvas ref={imageCanvasRef} className="absolute inset-0 h-full w-full" />
+              <canvas ref={previewCanvasRef} className="absolute inset-0 h-full w-full pointer-events-none" />
+              <canvas
+                ref={maskCanvasRef}
+                className="absolute inset-0 h-full w-full touch-none select-none opacity-0"
+                style={{ cursor: isPanning ? 'grabbing' : isAltKeyPressed ? 'grab' : hoverPoint ? 'none' : 'crosshair' }}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={finishStroke}
+                onPointerCancel={finishStroke}
+                onLostPointerCapture={finishStroke}
+                onPointerLeave={handlePointerLeave}
+              />
             </div>
           </div>
-
-          <aside className="hidden w-full rounded-3xl border border-gray-200/70 bg-white/70 p-4 dark:border-white/[0.08] dark:bg-white/[0.03] lg:block lg:w-72">
-            <div className="space-y-5">
-              <section>
-                <div className="mb-2 text-xs font-medium text-gray-400 dark:text-gray-500">工具</div>
-                <div className="flex rounded-2xl bg-gray-100/80 p-1 dark:bg-black/20">
-                  <button className={toolButtonClass(tool === 'brush')} onClick={() => setTool('brush')} disabled={!isReady || isSaving}>
-                    画笔
-                  </button>
-                  <button className={toolButtonClass(tool === 'eraser')} onClick={() => setTool('eraser')} disabled={!isReady || isSaving}>
-                    橡皮
-                  </button>
-                </div>
-                <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">
-                  画笔创建透明编辑区，橡皮恢复白色保护区。
-                </p>
-              </section>
-
-              <section>
-                <div className="mb-2 flex items-center justify-between text-xs font-medium text-gray-400 dark:text-gray-500">
-                  <span>笔刷大小</span>
-                  <span className="font-mono text-gray-500 dark:text-gray-300">{brushSize}px</span>
-                </div>
-                <input
-                  type="range"
-                  min={8}
-                  max={220}
-                  value={brushSize}
-                  onChange={(e) => setBrushSize(Number(e.target.value))}
-                  className="w-full accent-orange-500"
-                  disabled={!isReady || isSaving}
-                />
-              </section>
-
-              <section>
-                <div className="mb-2 text-xs font-medium text-gray-400 dark:text-gray-500">历史</div>
-                <div className="grid grid-cols-3 gap-2">
-                  <button onClick={handleUndo} disabled={!canUndo} className={actionButtonClass}>
-                    撤销
-                  </button>
-                  <button onClick={handleRedo} disabled={!canRedo} className={actionButtonClass}>
-                    重做
-                  </button>
-                  <button onClick={handleClear} disabled={!isReady || isSaving} className={actionButtonClass}>
-                    清空
-                  </button>
-                </div>
-              </section>
-
-              <section>
-                <div className="mb-2 text-xs font-medium text-gray-400 dark:text-gray-500">视图</div>
-                <button onClick={resetViewTransform} disabled={!isReady || isSaving || !isZoomed} className={actionButtonClass}>
-                  重置视图 · {viewTransform.scale.toFixed(1)}x
-                </button>
-                <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">
-                  移动端可双指缩放/平移，单指继续绘制遮罩。
-                </p>
-              </section>
-
-              <section className="rounded-2xl bg-orange-50/80 p-3 text-xs leading-relaxed text-orange-700 dark:bg-orange-500/10 dark:text-orange-200">
-                保存后会把当前图片加入参考图，并在提交时作为遮罩主图使用。
-              </section>
-            </div>
-          </aside>
+          <canvas ref={cursorCanvasRef} className="absolute inset-0 h-full w-full pointer-events-none" />
         </div>
 
-        <div className="shrink-0 border-t border-gray-100 px-3 py-2 dark:border-white/[0.08] sm:px-5 sm:py-3">
-          <div className="lg:hidden">
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-              <button className={`${compactButtonClass(tool === 'brush')} shrink-0`} onClick={() => setTool('brush')} disabled={!isReady || isSaving} aria-pressed={tool === 'brush'}>
-                画笔
+        {/* Footer Toolbar */}
+        <div className="absolute bottom-4 sm:bottom-8 left-1/2 -translate-x-1/2 flex items-center justify-center z-20 pointer-events-none w-full px-2 sm:px-4">
+          <div className="flex items-center gap-2 sm:gap-4 px-2 sm:px-3 py-1.5 sm:py-2 bg-white/95 dark:bg-[#0f0f0f]/95 backdrop-blur-md border border-gray-200/80 dark:border-white/5 rounded-2xl sm:rounded-[1.25rem] shadow-2xl pointer-events-auto">
+            <div className="flex items-center gap-1.5 sm:gap-3">
+              <div className="flex items-center bg-gray-100/80 dark:bg-[#232325]/80 p-1 rounded-xl sm:rounded-[14px]">
+                <button
+                  className={`p-2 sm:p-2.5 rounded-lg sm:rounded-xl transition-all ${tool === 'brush' ? 'bg-white shadow-sm text-blue-500 dark:bg-[#323338] dark:text-blue-400 dark:shadow-none' : 'text-gray-500 hover:text-gray-700 dark:text-[#8a8a8e] dark:hover:text-gray-200'}`}
+                  onClick={() => setTool('brush')}
+                  disabled={!isReady || isSaving}
+                  title="画笔"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                  </svg>
+                </button>
+                <button
+                  className={`p-2 sm:p-2.5 rounded-lg sm:rounded-xl transition-all ${tool === 'eraser' ? 'bg-white shadow-sm text-blue-500 dark:bg-[#323338] dark:text-blue-400 dark:shadow-none' : 'text-gray-500 hover:text-gray-700 dark:text-[#8a8a8e] dark:hover:text-gray-200'}`}
+                  onClick={() => setTool('eraser')}
+                  disabled={!isReady || isSaving}
+                  title="橡皮"
+                >
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <g transform="translate(0, 1) rotate(-45 12 12)">
+                      <path fill="currentColor" d="M4 10a2 2 0 0 1 2-2h7v8H6a2 2 0 0 1-2-2z" />
+                      <rect x="4" y="8" width="16" height="8" rx="2" />
+                    </g>
+                    <path d="M8 21h12" />
+                  </svg>
+                </button>
+              </div>
+              
+              <div ref={brushSizeControlRef} className="relative flex items-center justify-center">
+                <button
+                  ref={brushSizeButtonRef}
+                  onClick={toggleBrushControls}
+                  className={`flex items-center justify-center w-10 h-10 sm:w-[46px] sm:h-[46px] rounded-xl sm:rounded-[14px] transition-all border ${showBrushControls ? 'bg-blue-50 border-blue-200 text-blue-600 dark:bg-[#323338] dark:border-gray-600 dark:text-blue-400' : 'bg-white border-gray-200/80 text-gray-700 hover:bg-gray-50 dark:bg-transparent dark:border-[#323338] dark:text-[#e0e0e0] dark:hover:border-gray-500'}`}
+                  disabled={!isReady || isSaving}
+                  title="调节笔刷大小"
+                >
+                  <span className="text-[14px] sm:text-[15px] font-semibold tracking-tight">{brushSize}</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-0.5 sm:gap-2 sm:ml-1">
+              <button onClick={handleUndo} disabled={!canUndo} className="p-2 sm:p-2.5 text-gray-500 hover:bg-gray-100 rounded-lg sm:rounded-xl disabled:opacity-30 dark:text-[#8a8a8e] dark:hover:bg-white/10 dark:hover:text-gray-200 transition-all" title="撤销">
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 7v6h6" />
+                  <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+                </svg>
               </button>
-              <button className={`${compactButtonClass(tool === 'eraser')} shrink-0`} onClick={() => setTool('eraser')} disabled={!isReady || isSaving} aria-pressed={tool === 'eraser'}>
-                橡皮
+              <button onClick={handleRedo} disabled={!canRedo} className="p-2 sm:p-2.5 text-gray-500 hover:bg-gray-100 rounded-lg sm:rounded-xl disabled:opacity-30 dark:text-[#8a8a8e] dark:hover:bg-white/10 dark:hover:text-gray-200 transition-all" title="重做">
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 7v6h-6" />
+                  <path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7" />
+                </svg>
               </button>
-              <button className={`${compactButtonClass(showBrushControls)} shrink-0`} onClick={() => setShowBrushControls((v) => !v)} disabled={!isReady || isSaving}>
-                {brushSize}px
+              <div className="w-px h-4 sm:h-5 bg-gray-300 dark:bg-[#323338] mx-1"></div>
+              <button onClick={resetViewTransform} disabled={!isReady || isSaving || !isZoomed} className="p-2 sm:p-2.5 text-gray-500 hover:bg-gray-100 rounded-lg sm:rounded-xl disabled:opacity-30 dark:text-[#8a8a8e] dark:hover:bg-white/10 dark:hover:text-gray-200 transition-all" title="重置视图">
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 14h6v6"/>
+                  <path d="M20 10h-6V4"/>
+                  <path d="M14 10l7-7"/>
+                  <path d="M3 21l7-7"/>
+                </svg>
               </button>
-              <button onClick={handleUndo} disabled={!canUndo} className={`${compactButtonClass()} shrink-0`}>
-                撤销
-              </button>
-              <button onClick={handleRedo} disabled={!canRedo} className={`${compactButtonClass()} shrink-0`}>
-                重做
-              </button>
-              <button onClick={handleClear} disabled={!isReady || isSaving} className={`${compactButtonClass()} shrink-0`}>
-                清空
-              </button>
-              <button onClick={resetViewTransform} disabled={!isReady || isSaving || !isZoomed} className={`${compactButtonClass()} shrink-0`}>
-                重置
+              <button onClick={handleClear} disabled={!isReady || isSaving} className="p-2 sm:p-2.5 text-gray-500 hover:bg-gray-100 rounded-lg sm:rounded-xl disabled:opacity-30 dark:text-[#8a8a8e] dark:hover:bg-white/10 dark:hover:text-gray-200 transition-all" title="清空遮罩">
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 6h18"/>
+                  <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+                  <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+                </svg>
               </button>
             </div>
-            {showBrushControls && (
-              <div className="mt-2 rounded-2xl border border-gray-200/70 bg-white/75 px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.04]">
-                <div className="mb-1 flex items-center justify-between text-xs text-gray-400 dark:text-gray-500">
-                  <span>笔刷大小</span>
-                  <span className="font-mono text-gray-600 dark:text-gray-300">{brushSize}px</span>
-                </div>
-                <input
-                  type="range"
-                  min={8}
-                  max={220}
-                  value={brushSize}
-                  onChange={(e) => setBrushSize(Number(e.target.value))}
-                  className="w-full accent-orange-500"
-                  disabled={!isReady || isSaving}
-                />
-              </div>
-            )}
-          </div>
-
-          <div className="mt-2 grid grid-cols-[1fr_1.5fr] gap-2 sm:flex sm:flex-row sm:justify-end lg:mt-0">
-            <button
-              onClick={close}
-              disabled={isSaving}
-              className="rounded-xl border border-gray-200/70 bg-white/70 px-4 py-2 text-sm text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-45 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-300 dark:hover:bg-white/[0.08]"
-            >
-              取消
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={!isReady || isSaving}
-              className="rounded-xl bg-orange-500 px-4 py-2 text-sm font-medium text-white shadow-sm shadow-orange-500/20 transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:shadow-none dark:disabled:bg-white/[0.08]"
-            >
-              {isSaving ? '保存中...' : '保存遮罩'}
-            </button>
           </div>
         </div>
       </div>
-    </div>
+      {showBrushControls && sliderAnchor && createPortal(
+        <div
+          ref={brushSizePanelRef}
+          className="fixed z-[100] h-44 w-14 -translate-x-1/2 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700"
+          style={{ left: sliderAnchor.left, bottom: sliderAnchor.bottom }}
+        >
+          <input
+            type="range"
+            min={8}
+            max={220}
+            value={brushSize}
+            onChange={(e) => {
+              const nextSize = Number(e.target.value)
+              setBrushSize(nextSize)
+              if (!isPointerOverCanvas && size) updateCursor(getViewportCenterCanvasPoint())
+            }}
+            className="absolute left-1/2 top-1/2 h-5 w-32 -translate-x-1/2 -translate-y-1/2 -rotate-90 accent-blue-500 cursor-ns-resize"
+            disabled={!isReady || isSaving}
+          />
+        </div>,
+        document.body,
+      )}
+    </>
   )
 }

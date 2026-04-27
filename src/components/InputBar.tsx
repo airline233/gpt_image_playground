@@ -229,6 +229,10 @@ export default function InputBar() {
 
   const hideModerationHint = () => {
     setModerationHintVisible(false)
+    clearModerationHintTimer()
+  }
+
+  const clearModerationHintTimer = () => {
     if (moderationHintTimerRef.current != null) {
       window.clearTimeout(moderationHintTimerRef.current)
       moderationHintTimerRef.current = null
@@ -247,6 +251,10 @@ export default function InputBar() {
 
   const hideCompressionHint = () => {
     setCompressionHintVisible(false)
+    clearCompressionHintTimer()
+  }
+
+  const clearCompressionHintTimer = () => {
     if (compressionHintTimerRef.current != null) {
       window.clearTimeout(compressionHintTimerRef.current)
       compressionHintTimerRef.current = null
@@ -266,6 +274,10 @@ export default function InputBar() {
 
   const hideQualityHint = () => {
     setQualityHintVisible(false)
+    clearQualityHintTimer()
+  }
+
+  const clearQualityHintTimer = () => {
     if (qualityHintTimerRef.current != null) {
       window.clearTimeout(qualityHintTimerRef.current)
       qualityHintTimerRef.current = null
@@ -477,30 +489,47 @@ export default function InputBar() {
 
   const renderImageThumb = (img: (typeof inputImages)[number]) => {
     const originalIndex = inputImages.findIndex((i) => i.id === img.id)
+    const isMaskTarget = maskDraft?.targetImageId === img.id
+    const canEdit = !maskTargetImage || isMaskTarget
+    const displaySrc = isMaskTarget && maskPreviewUrl ? maskPreviewUrl : img.dataUrl
+
     return (
       <div key={img.id} className="relative group inline-block">
-        <div className="relative w-[52px] h-[52px] rounded-xl overflow-hidden border border-gray-200 dark:border-white/[0.08] shadow-sm cursor-pointer">
+        <div 
+          className={`relative w-[52px] h-[52px] rounded-xl overflow-hidden border shadow-sm cursor-pointer ${
+            isMaskTarget ? 'border-blue-500 border-2' : 'border-gray-200 dark:border-white/[0.08]'
+          }`}
+          onClick={() => setLightboxImageId(img.id, inputImages.map((i) => i.id))}
+        >
           <img
-            src={img.dataUrl}
+            src={displaySrc}
             className="w-full h-full object-cover hover:opacity-90 transition-opacity"
-            onClick={() => setLightboxImageId(img.id, inputImages.map((i) => i.id))}
             alt=""
           />
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              setMaskEditorImageId(img.id)
-            }}
-            className="absolute bottom-1 left-1 rounded-lg bg-orange-500/90 px-1.5 py-0.5 text-[10px] font-medium text-white opacity-100 shadow-sm transition-opacity hover:bg-orange-500 sm:pointer-events-none sm:opacity-0 sm:group-hover:pointer-events-auto sm:group-hover:opacity-100 sm:focus-visible:pointer-events-auto sm:focus-visible:opacity-100"
-            title="编辑遮罩"
-          >
-            涂抹
-          </button>
+          {isMaskTarget && (
+            <span className="absolute left-1 top-1 rounded bg-blue-500/90 px-1.5 py-0.5 text-[8px] leading-none text-white font-bold tracking-wider backdrop-blur-sm z-10 pointer-events-none">
+              MASK
+            </span>
+          )}
+          {canEdit && (
+            <button 
+              className="absolute inset-0 w-full h-full bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer z-20 focus:outline-none border-none"
+              onClick={(e) => {
+                e.stopPropagation()
+                setMaskEditorImageId(img.id)
+              }}
+              title={isMaskTarget ? "编辑遮罩" : "添加遮罩"}
+            >
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+              </svg>
+            </button>
+          )}
         </div>
         <span
-          className="absolute -top-2 -right-2 w-[22px] h-[22px] rounded-full bg-red-500 text-white flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-red-600"
-          onClick={() => {
+          className="absolute -top-2 -right-2 w-[22px] h-[22px] rounded-full bg-red-500 text-white flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-red-600 z-30"
+          onClick={(e) => {
+            e.stopPropagation()
             if (originalIndex >= 0) removeInputImage(originalIndex)
           }}
         >
@@ -533,61 +562,12 @@ export default function InputBar() {
     </button>
   )
 
-  const renderImageGrid = (images: typeof inputImages) => (
-    <div className="grid grid-cols-[repeat(auto-fill,52px)] justify-between gap-x-2 gap-y-3 mb-3">
-      {images.map((img) => renderImageThumb(img))}
-      {renderClearAllButton()}
-    </div>
-  )
-
   const renderImageThumbs = () => {
-    if (!maskTargetImage) {
-      return <div ref={imagesRef}>{renderImageGrid(inputImages)}</div>
-    }
-
     return (
       <div ref={imagesRef}>
-        <div className="mb-3">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-medium text-orange-500">遮罩主图 · 遮罩作用于此图</span>
-            <div className="flex gap-1">
-              <button
-                type="button"
-                onClick={() => setMaskEditorImageId(maskTargetImage.id)}
-                className="rounded-lg bg-orange-50 px-2 py-1 text-xs text-orange-600 hover:bg-orange-100 dark:bg-orange-500/10 dark:text-orange-300"
-              >
-                编辑遮罩
-              </button>
-              <button
-                type="button"
-                onClick={clearMaskDraft}
-                className="rounded-lg bg-gray-100 px-2 py-1 text-xs text-gray-500 hover:bg-gray-200 dark:bg-white/[0.06]"
-              >
-                清除遮罩
-              </button>
-            </div>
-          </div>
-          <div className="flex items-center gap-3 rounded-2xl border border-orange-300/80 bg-orange-50/50 p-2 dark:border-orange-400/30 dark:bg-orange-500/10">
-            <div className="relative h-20 w-20 overflow-hidden rounded-xl bg-black/10">
-              <img
-                src={maskPreviewUrl || maskTargetImage.dataUrl}
-                className="h-full w-full cursor-pointer object-cover hover:opacity-90 transition-opacity"
-                onClick={() => setLightboxImageId(maskTargetImage.id, inputImages.map((i) => i.id))}
-                alt=""
-              />
-            </div>
-            <div className="min-w-0 text-xs text-gray-500 dark:text-gray-400">
-              <p className="font-medium text-gray-700 dark:text-gray-200">提交时此图会作为第一张输入图</p>
-              <p className="mt-1">橙色遮罩区域将被编辑，其余参考图只提供上下文。</p>
-            </div>
-          </div>
-        </div>
-
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-medium text-gray-500 dark:text-gray-400">参考图</span>
-          </div>
-          {renderImageGrid(referenceImages)}
+        <div className="grid grid-cols-[repeat(auto-fill,52px)] justify-between gap-x-2 gap-y-3 mb-3">
+          {inputImages.map((img) => renderImageThumb(img))}
+          {renderClearAllButton()}
         </div>
       </div>
     )
@@ -611,8 +591,9 @@ export default function InputBar() {
         onMouseEnter={showQualityHint}
         onMouseLeave={hideQualityHint}
         onTouchStart={startQualityHintTouch}
-        onTouchEnd={hideQualityHint}
+        onTouchEnd={clearQualityHintTimer}
         onTouchCancel={hideQualityHint}
+        onClick={showQualityHint}
       >
         <span className="text-gray-400 dark:text-gray-500 ml-1">质量</span>
         <Select
@@ -654,8 +635,9 @@ export default function InputBar() {
         onMouseEnter={showCompressionHint}
         onMouseLeave={hideCompressionHint}
         onTouchStart={startCompressionHintTouch}
-        onTouchEnd={hideCompressionHint}
+        onTouchEnd={clearCompressionHintTimer}
         onTouchCancel={hideCompressionHint}
+        onClick={showCompressionHint}
       >
         <span className="text-gray-400 dark:text-gray-500 ml-1">压缩率</span>
         <input
@@ -683,8 +665,9 @@ export default function InputBar() {
         onMouseEnter={showModerationHint}
         onMouseLeave={hideModerationHint}
         onTouchStart={startModerationHintTouch}
-        onTouchEnd={hideModerationHint}
+        onTouchEnd={clearModerationHintTimer}
         onTouchCancel={hideModerationHint}
+        onClick={showModerationHint}
       >
         <span className="text-gray-400 dark:text-gray-500 ml-1">审核</span>
         <Select

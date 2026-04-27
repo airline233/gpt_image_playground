@@ -168,7 +168,15 @@ export const useStore = create<AppState>()(
           for (const img of s.inputImages) imageCache.delete(img.id)
           return { inputImages: [], maskDraft: null, maskEditorImageId: null }
         }),
-      setInputImages: (imgs) => set({ inputImages: imgs }),
+      setInputImages: (imgs) =>
+        set((s) => {
+          const shouldClearMask =
+            Boolean(s.maskDraft) && !imgs.some((img) => img.id === s.maskDraft?.targetImageId)
+          return {
+            inputImages: imgs,
+            ...(shouldClearMask ? { maskDraft: null, maskEditorImageId: null } : {}),
+          }
+        }),
       maskDraft: null,
       setMaskDraft: (maskDraft) => set({ maskDraft }),
       clearMaskDraft: () => set({ maskDraft: null }),
@@ -500,11 +508,12 @@ export async function reuseConfig(task: TaskRecord) {
     }
   }
   setInputImages(imgs)
-  if (task.maskTargetImageId && task.maskImageId && imgs.some((img) => img.id === task.maskTargetImageId)) {
+  const maskTargetImageId = task.maskTargetImageId ?? (task.maskImageId ? task.inputImageIds[0] : null)
+  if (maskTargetImageId && task.maskImageId && imgs.some((img) => img.id === maskTargetImageId)) {
     const maskDataUrl = await ensureImageCached(task.maskImageId)
     if (maskDataUrl) {
       setMaskDraft({
-        targetImageId: task.maskTargetImageId,
+        targetImageId: maskTargetImageId,
         maskDataUrl,
         updatedAt: Date.now(),
       })
@@ -549,6 +558,7 @@ export async function removeMultipleTasks(taskIds: string[]) {
   for (const t of tasks) {
     if (toDelete.has(t.id)) {
       for (const id of t.inputImageIds || []) deletedImageIds.add(id)
+      if (t.maskImageId) deletedImageIds.add(t.maskImageId)
       for (const id of t.outputImages || []) deletedImageIds.add(id)
     }
   }
@@ -562,6 +572,7 @@ export async function removeMultipleTasks(taskIds: string[]) {
   const stillUsed = new Set<string>()
   for (const t of remaining) {
     for (const id of t.inputImageIds || []) stillUsed.add(id)
+    if (t.maskImageId) stillUsed.add(t.maskImageId)
     for (const id of t.outputImages || []) stillUsed.add(id)
   }
   for (const img of inputImages) stillUsed.add(img.id)
@@ -770,11 +781,31 @@ export async function addImageFromFile(file: File): Promise<void> {
   useStore.getState().addInputImage({ id, dataUrl })
 }
 
+/** 添加图片到输入（右键菜单）—— 支持 data/blob/http URL */
+export async function addImageFromUrl(src: string): Promise<void> {
+  const res = await fetch(src)
+  const blob = await res.blob()
+  if (!blob.type.startsWith('image/')) throw new Error('不是有效的图片')
+  const dataUrl = await blobToDataUrl(blob)
+  const id = await hashDataUrl(dataUrl)
+  imageCache.set(id, dataUrl)
+  useStore.getState().addInputImage({ id, dataUrl })
+}
+
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(reader.result as string)
     reader.onerror = reject
     reader.readAsDataURL(file)
+  })
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = reject
+    reader.readAsDataURL(blob)
   })
 }

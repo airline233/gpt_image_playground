@@ -95,10 +95,10 @@ export async function createMaskPreviewDataUrl(imageDataUrl: string, maskDataUrl
   const overlay = ctx.createImageData(canvas.width, canvas.height)
   for (let i = 0; i < maskPixels.data.length; i += 4) {
     const editStrength = 255 - maskPixels.data[i + 3]
-    overlay.data[i] = 255
-    overlay.data[i + 1] = 96
-    overlay.data[i + 2] = 32
-    overlay.data[i + 3] = Math.round(editStrength * 0.55)
+    overlay.data[i] = 59
+    overlay.data[i + 1] = 130
+    overlay.data[i + 2] = 246
+    overlay.data[i + 3] = Math.round(editStrength * 0.58)
   }
 
   const overlayCanvas = document.createElement('canvas')
