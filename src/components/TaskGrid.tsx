@@ -13,7 +13,7 @@ export default function TaskGrid() {
   const setSelectedTaskIds = useStore((s) => s.setSelectedTaskIds)
   const clearSelection = useStore((s) => s.clearSelection)
   const hasOverlayOpen = useStore((s) =>
-    Boolean(s.detailTaskId || s.lightboxImageId || s.maskEditorImageId || s.showSettings || s.confirmDialog),
+    Boolean(s.detailTaskId || s.lightboxImageId || s.maskEditorImageId || s.confirmDialog),
   )
 
   const rootRef = useRef<HTMLDivElement>(null)

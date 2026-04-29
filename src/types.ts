@@ -1,28 +1,9 @@
-// ===== 设置 =====
+// ===== 固定 API 配置（来自环境变量） =====
 
-export type ApiMode = 'images' | 'responses'
-
-export interface AppSettings {
-  baseUrl: string
-  apiKey: string
-  model: string
-  timeout: number
-  apiMode: ApiMode
-  codexCli: boolean
-}
-
-const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://api.openai.com/v1'
-export const DEFAULT_IMAGES_MODEL = 'gpt-image-2'
-export const DEFAULT_RESPONSES_MODEL = 'gpt-5.5'
-
-export const DEFAULT_SETTINGS: AppSettings = {
-  baseUrl: DEFAULT_BASE_URL,
-  apiKey: '',
-  model: DEFAULT_IMAGES_MODEL,
-  timeout: 300,
-  apiMode: 'images',
-  codexCli: false,
-}
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || 'https://api.openai.com/v1'
+export const API_KEY = import.meta.env.VITE_API_KEY?.trim() || ''
+export const API_MODEL = import.meta.env.VITE_API_MODEL?.trim() || 'gpt-5.5'
+export const API_TIMEOUT = 3000
 
 // ===== 任务参数 =====
 
@@ -67,12 +48,6 @@ export interface TaskRecord {
   id: string
   prompt: string
   params: TaskParams
-  /** API 返回的实际生效参数，用于标记与请求值不一致的情况 */
-  actualParams?: Partial<TaskParams>
-  /** 输出图片对应的实际生效参数，key 为 outputImages 中的图片 id */
-  actualParamsByImage?: Record<string, Partial<TaskParams>>
-  /** 输出图片对应的 API 改写提示词，key 为 outputImages 中的图片 id */
-  revisedPromptByImage?: Record<string, string>
   /** 输入图片的 image store id 列表 */
   inputImageIds: string[]
   maskTargetImageId?: string | null
@@ -101,17 +76,6 @@ export interface StoredImage {
 }
 
 // ===== API 请求体 =====
-
-export interface ImageGenerationRequest {
-  model: string
-  prompt: string
-  size: string
-  quality: string
-  output_format: string
-  moderation: string
-  output_compression?: number
-  n?: number
-}
 
 // ===== API 响应 =====
 
@@ -170,7 +134,6 @@ export interface ResponsesApiResponse {
 export interface ExportData {
   version: number
   exportedAt: string
-  settings: AppSettings
   tasks: TaskRecord[]
   /** imageId → 图片信息 */
   imageFiles: Record<string, {

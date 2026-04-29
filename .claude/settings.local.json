@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(npx vitest *)",
+      "Bash(npx -y vitest run)",
+      "Bash(npm run *)",
+      "Bash(ls node_modules/.bin/vite*)",
+      "Bash(ls node_modules/vite/package.json)",
+      "Bash(npm ls *)",
+      "Bash(npm install *)"
+    ]
+  }
+}

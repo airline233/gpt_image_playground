@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_PARAMS, DEFAULT_SETTINGS } from './types'
+import { DEFAULT_PARAMS } from './types'
 import type { TaskRecord } from './types'
 import { editOutputs, submitTask, useStore } from './store'
 
@@ -26,17 +26,14 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
 describe('mask draft lifecycle in store actions', () => {
   beforeEach(() => {
     useStore.setState({
-      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
       prompt: 'prompt',
       inputImages: [],
       maskDraft: null,
       maskEditorImageId: null,
-      params: { ...DEFAULT_PARAMS },
       tasks: [],
       detailTaskId: null,
       lightboxImageId: null,
       lightboxImageList: [],
-      showSettings: false,
       toast: null,
       confirmDialog: null,
       showToast: vi.fn(),

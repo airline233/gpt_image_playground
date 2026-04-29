@@ -2,7 +2,6 @@ import { useEffect, useState, useRef } from 'react'
 import type { TaskRecord } from '../types'
 import { useStore, getCachedImage, ensureImageCached, updateTaskInStore } from '../store'
 import { formatImageRatio } from '../lib/size'
-import { ParamValue } from '../lib/paramDisplay'
 
 interface Props {
   task: TaskRecord
@@ -160,9 +159,6 @@ export default function TaskCard({
     const ss = String(seconds % 60).padStart(2, '0')
     return `${mm}:${ss}`
   })()
-  const aggregateActualParams = task.outputImages?.length
-    ? { ...task.actualParams, n: task.outputImages.length }
-    : task.actualParams
   const isSwipeReady = Math.abs(swipeOffset) >= 40
   const showSwipeAction = isSwipeReady || swipeActionActive
   const swipeBgClass = showSwipeAction
@@ -331,18 +327,6 @@ export default function TaskCard({
             </p>
           </div>
           <div className="mt-auto flex flex-col gap-1.5">
-            {/* 参数：横向滚动 */}
-            <div className="flex overflow-x-auto hide-scrollbar gap-1.5 whitespace-nowrap mask-edge-r min-w-0 pr-2">
-              <ParamValue task={task} paramKey="quality" className="text-xs px-1.5 py-0.5 rounded flex-shrink-0" />
-              <ParamValue task={task} paramKey="size" className="text-xs px-1.5 py-0.5 rounded flex-shrink-0" />
-              <ParamValue task={task} paramKey="output_format" className="text-xs px-1.5 py-0.5 rounded flex-shrink-0" />
-              <ParamValue task={task} paramKey="n" className="text-xs px-1.5 py-0.5 rounded flex-shrink-0" actualParams={aggregateActualParams} />
-              {task.maskImageId && (
-                <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 flex-shrink-0">
-                  mask
-                </span>
-              )}
-              </div>
             {/* 操作按钮 */}
             <div
               className="flex gap-1 justify-end flex-shrink-0"

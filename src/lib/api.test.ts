@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_PARAMS, DEFAULT_SETTINGS } from '../types'
 import { callImageApi } from './api'
 
 describe('callImageApi', () => {
@@ -7,14 +6,11 @@ describe('callImageApi', () => {
     vi.restoreAllMocks()
   })
 
-  it('records actual params returned on Images API responses in Codex CLI mode', async () => {
+  it('calls /v1/responses and parses image_generation_call output', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
-      output_format: 'png',
-      quality: 'medium',
-      size: '1033x1522',
-      data: [{
-        b64_json: 'aW1hZ2U=',
-        revised_prompt: '移除靴子',
+      output: [{
+        type: 'image_generation_call',
+        result: 'aW1hZ2U=',
       }],
     }), {
       status: 200,
@@ -22,51 +18,41 @@ describe('callImageApi', () => {
     }))
 
     const result = await callImageApi({
-      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', codexCli: true },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS },
+      prompt: 'test prompt',
       inputImageDataUrls: [],
     })
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(result.actualParams).toEqual({
-      output_format: 'png',
-      quality: 'medium',
-      size: '1033x1522',
-    })
-    expect(result.actualParamsList).toEqual([{
-      output_format: 'png',
-      quality: 'medium',
-      size: '1033x1522',
-    }])
-    expect(result.revisedPrompts).toEqual(['移除靴子'])
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(init!.body as string)
+    expect(body.model).toBe('gpt-5.5')
+    expect(body.input).toBe('test prompt')
+    expect(body.tools[0].type).toBe('image_generation')
+    expect(body.tools[0].action).toBe('generate')
+    expect(result.images).toHaveLength(1)
+    expect(result.images[0]).toMatch(/^data:image\/png;base64,/)
   })
 
-  it('does not synthesize actual quality in Codex CLI mode when the API omits it', async () => {
+  it('sends edit action when input images are provided', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
-      output_format: 'png',
-      size: '1033x1522',
-      data: [{ b64_json: 'aW1hZ2U=' }],
+      output: [{
+        type: 'image_generation_call',
+        result: 'aW1hZ2U=',
+      }],
     }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }))
 
     const result = await callImageApi({
-      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', codexCli: true },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS },
-      inputImageDataUrls: [],
+      prompt: 'edit prompt',
+      inputImageDataUrls: ['data:image/png;base64,input'],
     })
 
-    expect(result.actualParams).toEqual({
-      output_format: 'png',
-      size: '1033x1522',
-    })
-    expect(result.actualParams?.quality).toBeUndefined()
-    expect(result.actualParamsList).toEqual([{
-      output_format: 'png',
-      size: '1033x1522',
-    }])
+    const [, init] = vi.mocked(fetch).mock.calls[0]
+    const body = JSON.parse(init!.body as string)
+    expect(body.tools[0].action).toBe('edit')
+    expect(Array.isArray(body.input)).toBe(true)
+    expect(result.images).toHaveLength(1)
   })
 })
