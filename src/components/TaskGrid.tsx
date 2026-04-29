@@ -12,10 +12,6 @@ export default function TaskGrid() {
   const selectedTaskIds = useStore((s) => s.selectedTaskIds)
   const setSelectedTaskIds = useStore((s) => s.setSelectedTaskIds)
   const clearSelection = useStore((s) => s.clearSelection)
-  const hasOverlayOpen = useStore((s) =>
-    Boolean(s.detailTaskId || s.lightboxImageId || s.maskEditorImageId || s.confirmDialog),
-  )
-
   const rootRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
   const [selectionBox, setSelectionBox] = useState<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null)
@@ -106,18 +102,23 @@ export default function TaskGrid() {
   }
 
   useEffect(() => {
+    const getEventElement = (e: MouseEvent) => {
+      if (e.target instanceof Element) return e.target
+      return document.elementFromPoint(e.clientX, e.clientY)
+    }
+
     const handleDocumentMouseDown = (e: MouseEvent) => {
-      if (hasOverlayOpen) return
       if (e.button !== 0) return
-      const target = e.target as HTMLElement | null
+      const target = getEventElement(e)
       if (!target) return
-      if (!target.closest('[data-home-main]')) return
+      if (!target.closest('[data-drag-select-surface]')) return
       if (target.closest('[data-input-bar]')) return
-      if (target.closest('[data-no-drag-select]')) return
+      if (target.closest('[data-no-drag-select], [data-lightbox-root]')) return
       if (target.closest('button, a, input, textarea, select')) return
 
       const isCtrl = isMac ? e.metaKey : e.ctrlKey
-      beginSelection(target, e.clientX, e.clientY, isCtrl)
+      beginSelection(target as HTMLElement, e.clientX, e.clientY, isCtrl)
+      e.preventDefault()
     }
 
     const handleDocumentMouseMove = (e: MouseEvent) => {
@@ -154,15 +155,15 @@ export default function TaskGrid() {
       setSelectionBox(null)
     }
 
-    document.addEventListener('mousedown', handleDocumentMouseDown)
-    document.addEventListener('mousemove', handleDocumentMouseMove)
-    document.addEventListener('mouseup', handleDocumentMouseUp)
+    document.addEventListener('mousedown', handleDocumentMouseDown, true)
+    document.addEventListener('mousemove', handleDocumentMouseMove, true)
+    document.addEventListener('mouseup', handleDocumentMouseUp, true)
     return () => {
-      document.removeEventListener('mousedown', handleDocumentMouseDown)
-      document.removeEventListener('mousemove', handleDocumentMouseMove)
-      document.removeEventListener('mouseup', handleDocumentMouseUp)
+      document.removeEventListener('mousedown', handleDocumentMouseDown, true)
+      document.removeEventListener('mousemove', handleDocumentMouseMove, true)
+      document.removeEventListener('mouseup', handleDocumentMouseUp, true)
     }
-  }, [clearSelection, hasOverlayOpen, isMac])
+  }, [clearSelection, isMac])
 
   if (!filteredTasks.length) {
     return (
@@ -228,7 +229,7 @@ export default function TaskGrid() {
       </div>
       {selectionBox && (
         <div
-          className="fixed bg-blue-500/20 border border-blue-500/50 pointer-events-none z-[100]"
+          className="fixed bg-blue-500/20 border border-blue-500/50 pointer-events-none z-[30]"
           style={{
             left: Math.min(selectionBox.startX, selectionBox.currentX),
             top: Math.min(selectionBox.startY, selectionBox.currentY),

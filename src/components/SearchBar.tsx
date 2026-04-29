@@ -10,7 +10,7 @@ export default function SearchBar() {
   const setFilterFavorite = useStore((s) => s.setFilterFavorite)
 
   return (
-    <div className="mt-6 mb-4 flex gap-3">
+    <div data-no-drag-select className="mt-6 mb-4 flex gap-3">
       <div className="flex gap-2 flex-shrink-0 z-20">
         <button
           onClick={() => setFilterFavorite(!filterFavorite)}

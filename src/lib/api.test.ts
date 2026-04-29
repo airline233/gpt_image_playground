@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { callImageApi } from './api'
+import { DEFAULT_SETTINGS, DEFAULT_PARAMS } from '../types'
 
 describe('callImageApi', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllEnvs()
   })
 
   it('calls /v1/responses and parses image_generation_call output', async () => {
@@ -20,6 +22,8 @@ describe('callImageApi', () => {
     const result = await callImageApi({
       prompt: 'test prompt',
       inputImageDataUrls: [],
+      settings: DEFAULT_SETTINGS,
+      params: DEFAULT_PARAMS,
     })
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -47,6 +51,8 @@ describe('callImageApi', () => {
     const result = await callImageApi({
       prompt: 'edit prompt',
       inputImageDataUrls: ['data:image/png;base64,input'],
+      settings: DEFAULT_SETTINGS,
+      params: DEFAULT_PARAMS,
     })
 
     const [, init] = vi.mocked(fetch).mock.calls[0]
@@ -54,5 +60,59 @@ describe('callImageApi', () => {
     expect(body.tools[0].action).toBe('edit')
     expect(Array.isArray(body.input)).toBe(true)
     expect(result.images).toHaveLength(1)
+  })
+
+  it('uses the same-origin API proxy path when API proxy is enabled', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: true,
+        baseUrl: 'http://api.example.com/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api-proxy/images/generations',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('ignores stored API proxy settings when the current deployment has no proxy', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'false')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: true,
+        baseUrl: 'http://api.example.com/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://api.example.com/v1/images/generations',
+      expect.objectContaining({ method: 'POST' }),
+    )
   })
 })
